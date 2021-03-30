@@ -9,7 +9,10 @@ package state
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
+	pb "github.com/golang/protobuf/proto"
+	"github.com/hyperledger/fabric-protos-go/common"
 	proto "github.com/hyperledger/fabric-protos-go/gossip"
 	"github.com/hyperledger/fabric/common/metrics"
 	"github.com/hyperledger/fabric/gossip/util"
@@ -51,6 +54,9 @@ type PayloadsBufferImpl struct {
 	mutex sync.RWMutex
 
 	logger util.Logger
+
+	txCount    uint64
+	blockCount uint64
 }
 
 // NewPayloadsBuffer is factory function to create new payloads buffer
@@ -87,10 +93,44 @@ func (b *PayloadsBufferImpl) Push(payload *proto.Payload) {
 
 	b.buf[seqNum] = payload
 
+	// Stats for orderered TXs
+	if b.blockCount == 0 {
+		// Start ticker to log every second
+		go b.startCountLogging()
+	}
+	b.blockCount++
+	block := &common.Block{}
+	err := pb.Unmarshal(payload.Data, block)
+	if err == nil && block.Data != nil {
+		b.txCount += uint64(len(block.Data.Data))
+	}
+
 	// Send notification that next sequence has arrived
 	if seqNum == b.next && len(b.readyChan) == 0 {
 		b.readyChan <- struct{}{}
 	}
+}
+
+func (b *PayloadsBufferImpl) startCountLogging() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			ts := now.UnixNano() // in nanoseconds
+			// Get a snapshot of the shared map with proposal counts
+			var blockCount uint64
+			var txCount uint64
+			b.mutex.Lock()
+			blockCount = b.blockCount
+			txCount = b.txCount
+			b.mutex.Unlock()
+			b.logger.Warningf("OrderedTxCount: %d %d %d", ts, txCount, blockCount)
+		}
+	}
+
 }
 
 // Next function provides the number of the next expected block

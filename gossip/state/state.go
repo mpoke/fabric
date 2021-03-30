@@ -166,6 +166,9 @@ type GossipStateProviderImpl struct {
 	blockingMode bool
 
 	config *StateConfig
+
+	txCount    uint64
+	blockCount uint64
 }
 
 // stateRequestValidator facilitates validation of the state request messages
@@ -546,8 +549,15 @@ func (s *GossipStateProviderImpl) Stop() {
 }
 
 func (s *GossipStateProviderImpl) deliverPayloads() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
+		case <-ticker.C:
+			now := time.Now()
+			ts := now.UnixNano() // in nanoseconds
+			s.logger.Warningf("CommittedTxCount: %d %d %d", ts, s.txCount, s.blockCount)
 		// Wait for notification that next seq has arrived
 		case <-s.payloads.Ready():
 			s.logger.Debugf("[%s] Ready to transfer payloads (blocks) to the ledger, next block number is = [%d]", s.chainID, s.payloads.Next())
@@ -808,6 +818,10 @@ func (s *GossipStateProviderImpl) commitBlock(block *common.Block, pvtData util.
 
 	sinceT1 := time.Since(t1)
 	s.stateMetrics.CommitDuration.With("channel", s.chainID).Observe(sinceT1.Seconds())
+
+	// Stats for committed TXs
+	s.blockCount++
+	s.txCount += uint64(len(block.Data.Data))
 
 	// Update ledger height
 	s.mediator.UpdateLedgerHeight(block.Header.Number+1, common2.ChannelID(s.chainID))
