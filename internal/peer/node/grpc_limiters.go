@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/hyperledger/fabric/common/semaphore"
+	"github.com/hyperledger/fabric/common/util"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
@@ -44,7 +45,12 @@ func unaryGrpcLimiter(semaphores map[string]semaphore.Semaphore) grpc.UnaryServe
 			return handler(ctx, req)
 		}
 		if !sema.TryAcquire() {
-			logger.Errorf("Too many requests for %s, exceeding concurrency limit (%d)", serviceName, cap(sema))
+			if serviceName == "/protos.Endorser" {
+				addr := util.ExtractRemoteAddress(ctx)
+				logger.Errorf("Too many requests for %s, exceeding concurrency limit (%d) -- from addr=%s", serviceName, cap(sema), addr)
+			} else {
+				logger.Errorf("Too many requests for %s, exceeding concurrency limit (%d)", serviceName, cap(sema))
+			}
 			return nil, errors.Errorf("too many requests for %s, exceeding concurrency limit (%d)", serviceName, cap(sema))
 		}
 		defer sema.Release()

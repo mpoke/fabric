@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -100,6 +102,11 @@ type Endorser struct {
 	Support                Support
 	PvtRWSetAssembler      PvtRWSetAssembler
 	Metrics                *Metrics
+
+	proposalCount     map[string]uint64
+	proposalCountLock sync.Mutex
+	endorseCount      map[string]uint64
+	endorseCountLock  sync.Mutex
 }
 
 // call specified chaincode (system or user)
@@ -310,6 +317,44 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 		return &pb.ProposalResponse{Response: &pb.Response{Status: 500, Message: err.Error()}}, err
 	}
 
+	if strings.Contains(up.ChaincodeName, "bench") && !up.Input.IsInit {
+		startTicker := false
+		e.proposalCountLock.Lock()
+		if e.proposalCount == nil {
+			startTicker = true
+			e.proposalCount = make(map[string]uint64)
+		}
+		// Get rid of the port number
+		ip := strings.Split(addr, ":")[0]
+		e.proposalCount[ip]++
+		e.proposalCountLock.Unlock()
+		if startTicker {
+			// Start ticker to log proposalCount every second
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ticker.C:
+						now := time.Now()
+						ts := now.UnixNano() // in nanoseconds
+						// Get a snapshot of the shared map with proposal counts
+						snapshot := make(map[string]uint64)
+						e.proposalCountLock.Lock()
+						for k, v := range e.proposalCount {
+							snapshot[k] = v
+						}
+						e.proposalCountLock.Unlock()
+						for client, count := range snapshot {
+							endorserLogger.Warnf("ProposalCount: %s %d %d", client, ts, count)
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	var channel *Channel
 	if up.ChannelID() != "" {
 		channel = e.ChannelFetcher.Channel(up.ChannelID())
@@ -352,6 +397,45 @@ func (e *Endorser) ProcessProposal(ctx context.Context, signedProp *pb.SignedPro
 		// total failed proposals = ProposalsReceived-SuccessfulProposals
 		e.Metrics.SuccessfulProposals.Add(1)
 	}
+
+	if strings.Contains(up.ChaincodeName, "bench") && !up.Input.IsInit {
+		startTicker := false
+		e.endorseCountLock.Lock()
+		if e.endorseCount == nil {
+			startTicker = true
+			e.endorseCount = make(map[string]uint64)
+		}
+		// Get rid of the port number
+		ip := strings.Split(addr, ":")[0]
+		e.endorseCount[ip]++
+		e.endorseCountLock.Unlock()
+		if startTicker {
+			// Start ticker to log endorseCount every second
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ticker.C:
+						now := time.Now()
+						ts := now.UnixNano() // in nanoseconds
+						// Get a snapshot of the shared map with proposal counts
+						snapshot := make(map[string]uint64)
+						e.endorseCountLock.Lock()
+						for k, v := range e.endorseCount {
+							snapshot[k] = v
+						}
+						e.endorseCountLock.Unlock()
+						for client, count := range snapshot {
+							endorserLogger.Warnf("EndorseCount: %s %d %d", client, ts, count)
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	return pResp, nil
 }
 
