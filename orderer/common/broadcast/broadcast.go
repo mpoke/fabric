@@ -8,6 +8,8 @@ package broadcast
 
 import (
 	"io"
+	"strings"
+	"sync"
 	"time"
 
 	cb "github.com/hyperledger/fabric-protos-go/common"
@@ -60,6 +62,9 @@ type Consenter interface {
 type Handler struct {
 	SupportRegistrar ChannelSupportRegistrar
 	Metrics          *Metrics
+
+	txCount     map[string]uint64
+	txCountLock sync.Mutex
 }
 
 // Handle reads requests from a Broadcast stream, processes them, and returns the responses to the stream
@@ -159,6 +164,40 @@ func (bh *Handler) ProcessMessage(msg *cb.Envelope, addr string) (resp *ab.Broad
 
 	if !isConfig {
 		logger.Debugf("[channel: %s] Broadcast is processing normal message from %s with txid '%s' of type %s", chdr.ChannelId, addr, chdr.TxId, cb.HeaderType_name[chdr.Type])
+
+		if strings.Contains(chdr.ChannelId, "mychannel") {
+			startTicker := false
+			bh.txCountLock.Lock()
+			if bh.txCount == nil {
+				startTicker = true
+				bh.txCount = make(map[string]uint64)
+			}
+			bh.txCount[chdr.ChannelId]++
+			bh.txCountLock.Unlock()
+			if startTicker {
+				// Start thread to log txCount every second
+				go func() {
+					ticker := time.NewTicker(time.Second)
+					defer ticker.Stop()
+
+					for {
+						select {
+						case <-ticker.C:
+							ts := time.Now().UnixNano() // in nanoseconds
+							snapshot := make(map[string]uint64)
+							bh.txCountLock.Lock()
+							for k, v := range bh.txCount {
+								snapshot[k] = v
+							}
+							bh.txCountLock.Unlock()
+							for channelId, count := range snapshot {
+								logger.Warningf("BroadcastTxCount: %s %d %d", channelId, ts, count)
+							}
+						}
+					}
+				}()
+			}
+		}
 
 		configSeq, err := processor.ProcessNormalMsg(msg)
 		if err != nil {

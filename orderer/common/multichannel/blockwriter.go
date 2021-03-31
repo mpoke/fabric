@@ -7,7 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 package multichannel
 
 import (
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	cb "github.com/hyperledger/fabric-protos-go/common"
@@ -28,6 +30,11 @@ type blockWriterSupport interface {
 	SharedConfig() newchannelconfig.Orderer
 }
 
+type CommitCount struct {
+	blocks uint64
+	txs    uint64
+}
+
 // BlockWriter efficiently writes the blockchain to disk.
 // To safely use BlockWriter, only one thread should interact with it.
 // BlockWriter will spawn additional committing go routines and handle locking
@@ -39,6 +46,8 @@ type BlockWriter struct {
 	lastConfigSeq      uint64
 	lastBlock          *cb.Block
 	committingBlock    sync.Mutex
+
+	commitCount map[string]*CommitCount
 }
 
 func newBlockWriter(lastBlock *cb.Block, r *Registrar, support blockWriterSupport) *BlockWriter {
@@ -186,6 +195,39 @@ func (bw *BlockWriter) commitBlock(encodedMetadataValue []byte) {
 		logger.Panicf("[channel: %s] Could not append block: %s", bw.support.ChannelID(), err)
 	}
 	logger.Debugf("[channel: %s] Wrote block [%d]", bw.support.ChannelID(), bw.lastBlock.GetHeader().Number)
+
+	if strings.Contains(bw.support.ChannelID(), "mychannel") {
+		if bw.commitCount == nil {
+			bw.commitCount = make(map[string]*CommitCount)
+
+			// Start thread to log txCount every second
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ticker.C:
+						ts := time.Now().UnixNano() // in nanoseconds
+						snapshot := make(map[string]CommitCount)
+						bw.committingBlock.Lock()
+						for k, v := range bw.commitCount {
+							snapshot[k] = *v
+						}
+						bw.committingBlock.Unlock()
+						for channelId, commitCount := range snapshot {
+							logger.Warningf("OrderedTxCount: %s %d %d %d", channelId, ts, commitCount.txs, commitCount.blocks)
+						}
+					}
+				}
+			}()
+		}
+		if _, found := bw.commitCount[bw.support.ChannelID()]; !found {
+			bw.commitCount[bw.support.ChannelID()] = &CommitCount{0, 0}
+		}
+		bw.commitCount[bw.support.ChannelID()].blocks += 1
+		bw.commitCount[bw.support.ChannelID()].txs += uint64(len(bw.lastBlock.Data.Data))
+	}
 }
 
 func (bw *BlockWriter) addBlockSignature(block *cb.Block, consenterMetadata []byte) {

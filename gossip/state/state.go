@@ -167,8 +167,9 @@ type GossipStateProviderImpl struct {
 
 	config *StateConfig
 
-	txCount    uint64
-	blockCount uint64
+	txCount         uint64
+	blockCount      uint64
+	commitCountLock sync.Mutex
 }
 
 // stateRequestValidator facilitates validation of the state request messages
@@ -549,15 +550,8 @@ func (s *GossipStateProviderImpl) Stop() {
 }
 
 func (s *GossipStateProviderImpl) deliverPayloads() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
 	for {
 		select {
-		case <-ticker.C:
-			now := time.Now()
-			ts := now.UnixNano() // in nanoseconds
-			s.logger.Warningf("CommittedTxCount: %d %d %d", ts, s.txCount, s.blockCount)
 		// Wait for notification that next seq has arrived
 		case <-s.payloads.Ready():
 			s.logger.Debugf("[%s] Ready to transfer payloads (blocks) to the ledger, next block number is = [%d]", s.chainID, s.payloads.Next())
@@ -820,8 +814,18 @@ func (s *GossipStateProviderImpl) commitBlock(block *common.Block, pvtData util.
 	s.stateMetrics.CommitDuration.With("channel", s.chainID).Observe(sinceT1.Seconds())
 
 	// Stats for committed TXs
+	startTicker := false
+	s.commitCountLock.Lock()
+	if s.blockCount == 0 {
+		// Start ticker to log every second
+		startTicker = true
+	}
 	s.blockCount++
 	s.txCount += uint64(len(block.Data.Data))
+	s.commitCountLock.Unlock()
+	if startTicker {
+		go s.startCountLogging()
+	}
 
 	// Update ledger height
 	s.mediator.UpdateLedgerHeight(block.Header.Number+1, common2.ChannelID(s.chainID))
@@ -831,6 +835,25 @@ func (s *GossipStateProviderImpl) commitBlock(block *common.Block, pvtData util.
 	s.stateMetrics.Height.With("channel", s.chainID).Set(float64(block.Header.Number + 1))
 
 	return nil
+}
+
+func (s *GossipStateProviderImpl) startCountLogging() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			ts := time.Now().UnixNano() // in nanoseconds
+			var blockCount uint64
+			var txCount uint64
+			s.commitCountLock.Lock()
+			blockCount = s.blockCount
+			txCount = s.txCount
+			s.commitCountLock.Unlock()
+			s.logger.Warningf("CommittedTxCount: %d %d %d", ts, txCount, blockCount)
+		}
+	}
 }
 
 func min(a uint64, b uint64) uint64 {
